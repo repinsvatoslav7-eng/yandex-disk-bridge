@@ -531,4 +531,5 @@ def add_excel_sheet(path: str, sheet_name: str, index: int = -1, make_backup: bo
     wb = _load_workbook_from_disk(path)
     if sheet_name in wb.sheetnames:
         raise ValueError(f"Sheet already exists: {sheet_name}")
-    wb.create_sheet(title=sheet_name) if index < 
+    if index < 0:
+        wb.create_sheet(title=s
