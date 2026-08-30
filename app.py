@@ -92,16 +92,78 @@ def _download_bytes(path: str) -> bytes:
 
 def _upload_bytes(path: str, content: bytes, overwrite: bool = False) -> dict[str, Any]:
     path = _normalize_path(path)
+
+    # 1) Ask Yandex Disk for a temporary upload URL.
     r = requests.get(
         f"{YANDEX_API}/resources/upload",
         headers=yandex_headers(),
-        params={"path": path, "overwrite": str(overwrite).lower()},
+        params={"path": path, "overwrite": overwrite},
         timeout=30,
     )
     _raise(r)
-    u = requests.put(r.json()["href"], data=content, timeout=180)
+
+    upload_info = r.json()
+    href = upload_info.get("href")
+    method = str(upload_info.get("method") or "PUT").upper()
+
+    if not href:
+        raise RuntimeError(f"Yandex Disk did not return an upload URL for {path}")
+
+    # 2) Upload the raw bytes to the temporary URL.
+    upload_headers = {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(len(content)),
+    }
+
+    if method == "PUT":
+        u = requests.put(
+            href,
+            data=io.BytesIO(content),
+            headers=upload_headers,
+            timeout=180,
+            allow_redirects=True,
+        )
+    elif method == "POST":
+        u = requests.post(
+            href,
+            data=io.BytesIO(content),
+            headers=upload_headers,
+            timeout=180,
+            allow_redirects=True,
+        )
+    else:
+        raise RuntimeError(f"Unsupported upload method from Yandex Disk: {method}")
+
     _raise(u)
-    return {"ok": True, "path": path, "bytes_uploaded": len(content), "overwrite": overwrite}
+
+    # 3) Verify that the file actually appeared on Disk.
+    # Small files normally appear immediately, but we retry briefly.
+    verified = False
+    last_error = None
+    for _ in range(10):
+        try:
+            if _resource_exists(path):
+                verified = True
+                break
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(0.5)
+
+    if not verified:
+        raise RuntimeError(
+            f"Upload request succeeded, but file was not found on Yandex Disk: {path}. "
+            f"Upload status={u.status_code}, response={u.text[:500]!r}, "
+            f"last_check_error={last_error!r}"
+        )
+
+    return {
+        "ok": True,
+        "path": path,
+        "bytes_uploaded": len(content),
+        "overwrite": overwrite,
+        "upload_status": u.status_code,
+        "verified": True,
+    }
 
 def _wait_operation(href: str | None, timeout_seconds: int = 60) -> dict[str, Any]:
     if not href:
@@ -451,4 +513,4 @@ def delete_excel_sheet(path: str, sheet_name: str, make_backup: bool = True) -> 
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
-    
+        
