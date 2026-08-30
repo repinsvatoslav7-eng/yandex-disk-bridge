@@ -1,0 +1,8 @@
+mcp<2
+requests
+openpyxl
+python-docx
+pypdf
+python-pptx
+Pillow
+pillow-heif
