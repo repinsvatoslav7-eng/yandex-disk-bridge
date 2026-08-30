@@ -330,25 +330,74 @@ def create_folder(path: str) -> dict[str, Any]:
 def copy_file(source_path: str, destination_path: str, overwrite: bool = False) -> dict[str, Any]:
     return _copy_internal(source_path, destination_path, overwrite)
 
-@mcp.tool()
-def move_file(source_path: str, destination_path: str, overwrite: bool = False) -> dict[str, Any]:
+def _move_internal(source_path: str, destination_path: str, overwrite: bool = False) -> dict[str, Any]:
     source_path = _normalize_path(source_path)
     destination_path = _normalize_path(destination_path)
+
+    if not _resource_exists(source_path):
+        raise FileNotFoundError(f"Source does not exist: {source_path}")
+
+    if source_path == destination_path:
+        return {
+            "ok": True,
+            "source": source_path,
+            "destination": destination_path,
+            "already_at_destination": True,
+            "verified": True,
+        }
+
     r = requests.post(
         f"{YANDEX_API}/resources/move",
         headers=yandex_headers(),
-        params={"from": source_path, "path": destination_path, "overwrite": str(overwrite).lower()},
+        params={"from": source_path, "path": destination_path, "overwrite": overwrite},
         timeout=30,
     )
     op = _operation_result(r)
-    return {"ok": op.get("status") != "failed", "source": source_path, "destination": destination_path, "operation": op}
+
+    if op.get("status") == "failed":
+        raise RuntimeError(f"Yandex Disk move failed: {op}")
+
+    # Verify the final state because move may be asynchronous.
+    destination_exists = False
+    source_exists = True
+    for _ in range(20):
+        destination_exists = _resource_exists(destination_path)
+        source_exists = _resource_exists(source_path)
+        if destination_exists and not source_exists:
+            break
+        time.sleep(0.5)
+
+    if not destination_exists or source_exists:
+        raise RuntimeError(
+            f"Move request completed but verification failed: "
+            f"source={source_path!r} exists={source_exists}, "
+            f"destination={destination_path!r} exists={destination_exists}, operation={op}"
+        )
+
+    return {
+        "ok": True,
+        "source": source_path,
+        "destination": destination_path,
+        "operation": op,
+        "verified": True,
+    }
+
+
+@mcp.tool()
+def move_file(source_path: str, destination_path: str, overwrite: bool = False) -> dict[str, Any]:
+    return _move_internal(source_path, destination_path, overwrite)
+
 
 @mcp.tool()
 def rename_file(path: str, new_name: str, overwrite: bool = False) -> dict[str, Any]:
     path = _normalize_path(path)
-    if "/" in new_name.strip("/"):
+    new_name = new_name.strip()
+    if not new_name or "/" in new_name or "\\" in new_name:
         raise ValueError("new_name must be a basename only")
-    return move_file(path, _join(_parent(path), new_name), overwrite)
+    destination_path = _join(_parent(path), new_name)
+    result = _move_internal(path, destination_path, overwrite)
+    result["new_name"] = new_name
+    return result
 
 @mcp.tool()
 def backup_file(path: str) -> dict[str, Any]:
@@ -482,35 +531,4 @@ def add_excel_sheet(path: str, sheet_name: str, index: int = -1, make_backup: bo
     wb = _load_workbook_from_disk(path)
     if sheet_name in wb.sheetnames:
         raise ValueError(f"Sheet already exists: {sheet_name}")
-    wb.create_sheet(title=sheet_name) if index < 0 else wb.create_sheet(title=sheet_name, index=index)
-    result = _save_workbook(path, wb, make_backup)
-    result.update({"sheet_added": sheet_name, "sheet_names": wb.sheetnames})
-    return result
-
-@mcp.tool()
-def rename_excel_sheet(path: str, old_name: str, new_name: str, make_backup: bool = True) -> dict[str, Any]:
-    wb = _load_workbook_from_disk(path)
-    if old_name not in wb.sheetnames:
-        raise ValueError(f"Sheet not found: {old_name}")
-    if new_name in wb.sheetnames:
-        raise ValueError(f"Sheet already exists: {new_name}")
-    wb[old_name].title = new_name
-    result = _save_workbook(path, wb, make_backup)
-    result.update({"old_name": old_name, "new_name": new_name, "sheet_names": wb.sheetnames})
-    return result
-
-@mcp.tool()
-def delete_excel_sheet(path: str, sheet_name: str, make_backup: bool = True) -> dict[str, Any]:
-    wb = _load_workbook_from_disk(path)
-    if sheet_name not in wb.sheetnames:
-        raise ValueError(f"Sheet not found: {sheet_name}")
-    if len(wb.sheetnames) <= 1:
-        raise ValueError("Cannot delete the only worksheet in the workbook")
-    del wb[sheet_name]
-    result = _save_workbook(path, wb, make_backup)
-    result.update({"sheet_deleted": sheet_name, "sheet_names": wb.sheetnames})
-    return result
-
-if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
-        
+    wb.create_sheet(title=sheet_name) if index < 
